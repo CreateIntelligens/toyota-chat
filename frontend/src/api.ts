@@ -23,8 +23,7 @@ export const startChat = async () => {
   if (!STORE_NAME) throw new Error("Store Name not configured");
   try {
     const response = await api.post('/api/chat/start', {
-      store_name: STORE_NAME,
-      model: 'gemini-2.5-flash' // 恢復 OpenAPI 定義的預設模型名稱
+      store_name: STORE_NAME
     });
     return response.data;
   } catch (error: any) {
@@ -35,7 +34,6 @@ export const startChat = async () => {
 
 export const sendMessage = async (sessionId: string, message: string) => {
   try {
-    // 嚴格遵守 ChatMessageRequest 定義
     const response = await api.post('/api/chat/message', {
       session_id: sessionId,
       message: message
@@ -49,9 +47,8 @@ export const sendMessage = async (sessionId: string, message: string) => {
 
 export const getHistory = async (sessionId: string) => {
   try {
-    const response = await api.get('/api/chat/history', {
-      params: { session_id: sessionId }
-    });
+    // 嚴格遵守 0213-2 規格：/api/chat/history/{session_id}
+    const response = await api.get(`/api/chat/history/${sessionId}`);
     return response.data;
   } catch (error: any) {
     console.error('getHistory error:', error.response?.data || error.message);
@@ -62,12 +59,24 @@ export const getHistory = async (sessionId: string) => {
 export const getConversations = async () => {
   if (!STORE_NAME) throw new Error("Store Name not configured");
   try {
-    const response = await api.get('/api/chat/conversations', {
+    // 嚴格遵守 0213-2 規格：GET /api/chat/history?store_name=...
+    const response = await api.get('/api/chat/history', {
       params: { store_name: STORE_NAME }
     });
     return response.data;
   } catch (error: any) {
     console.error('getConversations error:', error.response?.data || error.message);
+    throw error;
+  }
+};
+
+export const deleteSession = async (sessionId: string) => {
+  try {
+    // 嚴格遵守 0213-2 規格：DELETE /api/chat/history/{session_id}
+    const response = await api.delete(`/api/chat/history/${sessionId}`);
+    return response.data;
+  } catch (error: any) {
+    console.error('deleteSession error:', error.response?.data || error.message);
     throw error;
   }
 };

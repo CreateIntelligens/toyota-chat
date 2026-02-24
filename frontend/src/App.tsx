@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { startChat, sendMessage, getHistory, getConversations } from './api';
+import { startChat, sendMessage, getHistory, getConversations, deleteSession } from './api';
 import type { Message } from './api';
 import { Send, Plus, MessageSquare, Menu, Loader2, User, Bot, ChevronLeft, ChevronRight, Sparkles, Trash2 } from 'lucide-react';
 import { format } from 'date-fns';
@@ -8,7 +8,7 @@ import clsx from 'clsx';
 interface ChatSession {
   session_id: string;
   last_message?: string;
-  updated_at?: number;
+  updated_at?: string;
 }
 
 function App() {
@@ -18,6 +18,7 @@ function App() {
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const skipHistoryLoadRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -26,6 +27,10 @@ function App() {
 
   useEffect(() => {
     if (currentSessionId) {
+      if (skipHistoryLoadRef.current) {
+        skipHistoryLoadRef.current = false;
+        return;
+      }
       loadHistory(currentSessionId);
     } else {
       setMessages([]);
@@ -42,22 +47,13 @@ function App() {
       console.log('Conversations data:', data);
       let parsedSessions: ChatSession[] = [];
 
+      // 根據 0213-2 規格解析列表：{ sessions: [ { session_id, preview, last_message_time } ] }
       if (data && data.sessions && Array.isArray(data.sessions)) {
         parsedSessions = data.sessions.map((s: any) => ({
-          session_id: s.session_id || s.id,
-          last_message: s.last_message || (s.messages && s.messages.length > 0 ? (s.messages[s.messages.length-1].text || s.messages[s.messages.length-1].content) : '歷史對話'),
-          updated_at: s.updated_at
+          session_id: s.session_id,
+          last_message: s.preview || '歷史對話',
+          updated_at: s.last_message_time
         }));
-      } else if (data && typeof data === 'object' && !Array.isArray(data)) {
-        // 相容舊格式
-        parsedSessions = Object.keys(data).map(sessionId => {
-          const sessionMessages = data[sessionId];
-          let lastMsg = '歷史對話';
-          if (Array.isArray(sessionMessages) && sessionMessages.length > 0) {
-            lastMsg = sessionMessages[sessionMessages.length - 1].content || '歷史對話';
-          }
-          return { session_id: sessionId, last_message: lastMsg };
-        });
       }
       
       setSessions(parsedSessions);
@@ -72,18 +68,29 @@ function App() {
       const data = await getHistory(sessionId);
       console.log('History data:', data);
       
-      let historyMsgs: any[] = [];
-      if (Array.isArray(data)) {
-        historyMsgs = data;
-      } else if (data && typeof data === 'object') {
-        historyMsgs = data.messages || data.history || [];
+      let historyMsgs: Message[] = [];
+      
+      // 根據 0213-2 規格解析詳情：{ conversations: [ { user_message, agent_response, timestamp, responded_at } ] }
+      if (data && data.conversations && Array.isArray(data.conversations)) {
+        data.conversations.forEach((item: any) => {
+          if (item.user_message) {
+            historyMsgs.push({
+              role: 'user',
+              content: item.user_message,
+              timestamp: item.timestamp
+            });
+          }
+          if (item.agent_response) {
+            historyMsgs.push({
+              role: 'model',
+              content: item.agent_response,
+              timestamp: item.responded_at || item.timestamp
+            });
+          }
+        });
       }
 
-      setMessages(historyMsgs.map(m => ({
-        role: m.role === 'assistant' ? 'model' : m.role,
-        content: m.text || m.content || m.message || '',
-        timestamp: m.timestamp || m.created_at
-      })));
+      setMessages(historyMsgs);
     } catch (error) {
       console.error("Failed to load history:", error);
     } finally {
@@ -124,6 +131,8 @@ function App() {
       if (!targetSessionId) {
         const sessionData = await startChat();
         targetSessionId = sessionData.session_id;
+        // 標記跳過下一次的 useEffect 歷史載入，避免覆蓋掉目前的即時訊息
+        skipHistoryLoadRef.current = true;
         setCurrentSessionId(targetSessionId);
         setSessions(prev => [{ session_id: targetSessionId!, last_message: userContent }, ...prev]);
       }
@@ -132,13 +141,15 @@ function App() {
         const response = await sendMessage(targetSessionId, userContent);
         console.log('Send message response:', response);
         
+        // 根據 0213-2 規格解析即時回應：{ message: "..." }
         const botMsg: Message = { 
           role: 'model',
-          content: response.answer || response.text || response.message || response.content || (typeof response === 'string' ? response : JSON.stringify(response)), 
+          content: response.message || response.answer || response.text || (typeof response === 'string' ? response : JSON.stringify(response)), 
           timestamp: new Date().toISOString() 
         };
         setMessages(prev => [...prev, botMsg]);
         
+        // 更新側邊欄預覽
         setSessions(prev => prev.map(s => 
           s.session_id === targetSessionId ? { ...s, last_message: userContent } : s
         ));
@@ -151,13 +162,19 @@ function App() {
     }
   };
 
-  const handleDeleteSession = (e: React.MouseEvent, sessionId: string) => {
+  const handleDeleteSession = async (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
-    if (window.confirm('確定要移除此對話紀錄嗎？')) {
-      setSessions(prev => prev.filter(s => s.session_id !== sessionId));
-      if (currentSessionId === sessionId) {
-        setCurrentSessionId(null);
-        setMessages([]);
+    if (window.confirm('確定要永久刪除此對話紀錄嗎？')) {
+      try {
+        await deleteSession(sessionId);
+        setSessions(prev => prev.filter(s => s.session_id !== sessionId));
+        if (currentSessionId === sessionId) {
+          setCurrentSessionId(null);
+          setMessages([]);
+        }
+      } catch (error) {
+        console.error("Failed to delete session:", error);
+        alert("刪除失敗，請稍後再試。");
       }
     }
   };
@@ -261,6 +278,11 @@ function App() {
               )}
             </button>
           ))}
+          {sessions.length === 0 && isSidebarOpen && (
+            <div className="text-center text-slate-500 mt-10 text-xs px-4">
+              尚無對話紀錄
+            </div>
+          )}
         </div>
 
         {/* Sidebar Footer */}
@@ -300,29 +322,10 @@ function App() {
                 <div className="w-24 h-24 rounded-[2rem] bg-gradient-to-br from-red-500 to-red-700 shadow-2xl shadow-red-500/30 flex items-center justify-center mb-8 transform hover:scale-105 transition-transform duration-500">
                   <Bot size={48} className="text-white" />
                 </div>
-                <h2 className="text-3xl font-bold text-slate-800 mb-3 tracking-tight">歡迎使用教育訓練助手</h2>
+                <h2 className="text-3xl font-bold text-slate-800 mb-3 tracking-tight">歡迎來到教育訓練聊天室</h2>
                 <p className="text-slate-500 max-w-md mb-10 text-lg leading-relaxed">
-                  我可以協助您查詢教育訓練流程、解答系統操作問題，或是提供相關文件資訊。
+                  請點擊「開啟新對話」或直接在下方輸入問題開始。
                 </p>
-                
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-2xl">
-                  {[
-                    { title: "教育訓練流程", desc: "查詢標準作業程序" },
-                    { title: "系統操作說明", desc: "如何使用後台管理" },
-                    { title: "常見問題", desc: "瀏覽 FAQ 列表" },
-                    { title: "聯繫支援", desc: "尋找相關負責人" }
-                  ].map((item, i) => (
-                    <button 
-                      key={i}
-                      onClick={() => setInputValue(item.title)}
-                      className="p-5 bg-white border border-slate-200 rounded-2xl text-left hover:border-red-500 hover:shadow-lg hover:shadow-red-500/5 transition-all group relative overflow-hidden"
-                    >
-                      <div className="absolute inset-0 bg-gradient-to-r from-red-50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-                      <h3 className="font-bold text-slate-700 group-hover:text-red-600 transition-colors relative z-10">{item.title}</h3>
-                      <p className="text-sm text-slate-400 mt-1 relative z-10">{item.desc}</p>
-                    </button>
-                  ))}
-                </div>
               </div>
             ) : (
               <>
